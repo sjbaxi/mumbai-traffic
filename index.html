@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mumbai Expressway Traffic</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    .status {
+      padding: 0.5rem 1rem;
+      border-radius: 0.5rem;
+      color: white;
+      font-weight: bold;
+      text-align: center;
+      min-width: 100px;
+    }
+    #map {
+      width: 100%;
+      height: 400px;
+      border-radius: 0.75rem;
+    }
+    .projection-table th, .projection-table td {
+      padding: 0.25rem 0.5rem;
+      border: 1px solid #ddd;
+      text-align: center;
+    }
+  </style>
+  <meta http-equiv="refresh" content="3600">
+</head>
+<body class="bg-gray-100 text-gray-800">
+  <div class="max-w-3xl mx-auto py-8 px-4">
+    <h1 class="text-3xl font-bold text-center mb-6">Mumbai Expressway Traffic</h1>
+    <p id="timestamp" class="text-center text-sm text-gray-500 mb-4">As of ...</p>
+
+    <div class="flex justify-center mb-6 space-x-4 text-sm">
+      <div class="flex items-center space-x-1"><span class="w-3 h-3 rounded-full bg-green-600 inline-block"></span> <span>Fast</span></div>
+      <div class="flex items-center space-x-1"><span class="w-3 h-3 rounded-full bg-yellow-500 inline-block"></span> <span>Moderate</span></div>
+      <div class="flex items-center space-x-1"><span class="w-3 h-3 rounded-full bg-red-600 inline-block"></span> <span>Heavy</span></div>
+    </div>
+
+    <div id="map" class="mb-6"></div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6" id="status-blocks"></div>
+
+    <div class="space-y-6" id="projections">
+      <div class="bg-white rounded-xl shadow">
+        <h2 class="p-4 text-xl font-semibold border-b">Projected Traffic (Next 1 Hour)</h2>
+        <div class="p-4">
+          <table class="w-full text-sm projection-table">
+            <thead class="bg-gray-200">
+              <tr>
+                <th>Time Slot</th>
+                <th>Western Express Hwy</th>
+                <th>Eastern Express Hwy</th>
+                <th>Mumbai-Pune Expressway</th>
+              </tr>
+            </thead>
+            <tbody id="projection-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-xl shadow">
+        <h2 class="p-4 text-xl font-semibold border-b">Average Speed by Hour</h2>
+        <div class="p-4">
+          <canvas id="speedChart" height="300"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API_KEY = '3p8eB37dlYbIfIqnnZOlHa43ZEYSo7kt';
+    const tailwindToHex = {
+      'bg-red-600': '#dc2626',
+      'bg-yellow-500': '#eab308',
+      'bg-green-600': '#16a34a',
+      'bg-gray-500': '#6b7280'
+    };
+
+    const locations = {
+      "bandra-status": [19.0544, 72.8400],
+      "bkc-status": [19.0676, 72.8685],
+      "airport-status": [19.0896, 72.8656],
+      "goregaon-status": [19.1550, 72.8499],
+      "malad-status": [19.1868, 72.8424],
+      "pune-status": [18.768, 73.456],
+      "khopoli-status": [18.7581, 73.3389],
+      "lonavala-status": [18.7503, 73.4072],
+      "parel-status": [18.9936, 72.8376],
+      "sion-status": [19.0396, 72.8646],
+      "dadar-status": [19.0184, 72.8446],
+      "vikhroli-status": [19.1024, 72.9343]
+    };
+
+    const map = L.map('map').setView([19.0896, 72.8656], 10);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+
+    const markers = {};
+    for (const id in locations) {
+      const [lat, lon] = locations[id];
+      markers[id] = L.circleMarker([lat, lon], {
+        radius: 8,
+        color: 'white',
+        weight: 1,
+        fillColor: 'gray',
+        fillOpacity: 0.9
+      }).addTo(map).bindPopup(id.replace('-status', ''));
+    }
+
+    function updateTimestamp() {
+      const now = new Date();
+      const timestamp = now.toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        hour12: true,
+        weekday: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric'
+      });
+      document.getElementById("timestamp").textContent = `As of ${timestamp}`;
+    }
+
+    async function getTomTomTraffic(lat, lon) {
+      const url = `https://api.tomtom.com/traffic/services/4/flowSegmentData/relative0/10/json?point=${lat},${lon}&key=${API_KEY}`;
+      try {
+        const response = await fetch(url);
+        const data = await response.json();
+        if (!response.ok || !data.flowSegmentData) {
+          console.error("TomTom API response:", data);
+          throw new Error("Invalid traffic data");
+        }
+        const segment = data.flowSegmentData;
+        const jamFactor = segment.currentSpeed / segment.freeFlowSpeed;
+        let level;
+        if (jamFactor < 0.5) level = 'heavy';
+        else if (jamFactor < 0.8) level = 'moderate';
+        else level = 'fast';
+        return { level, speed: segment.currentSpeed };
+      } catch (e) {
+        console.error("Error fetching traffic status:", e.message);
+        return { level: 'error', speed: 0 };
+      }
+    }
+
+    async function getTrafficStatus() {
+      const statusBlocks = document.getElementById('status-blocks');
+      statusBlocks.innerHTML = '';
+      for (const id in locations) {
+        const [lat, lon] = locations[id];
+        const { level, speed } = await getTomTomTraffic(lat, lon);
+        let color, label;
+        if (level === 'heavy') {
+          color = 'bg-red-600'; label = `Heavy Traffic (${speed} km/h)`;
+        } else if (level === 'moderate') {
+          color = 'bg-yellow-500'; label = `Moderate Traffic (${speed} km/h)`;
+        } else if (level === 'fast') {
+          color = 'bg-green-600'; label = `Fast Moving (${speed} km/h)`;
+        } else {
+          color = 'bg-gray-500'; label = 'Error retrieving data';
+        }
+        const name = id.replace('-status', '').replace(/\b\w/g, l => l.toUpperCase());
+        const block = `<div class="bg-white rounded shadow p-4">
+          <div class="text-lg font-semibold mb-2">${name}</div>
+          <div id="${id}" class="status ${color}">${label}</div>
+        </div>`;
+        statusBlocks.innerHTML += block;
+        markers[id].setStyle({ 
+          fillColor: tailwindToHex[color] || '#6b7280',
+          fillOpacity: 0.9 
+        });
+      }
+      updateTimestamp();
+    }
+
+    function generateProjections() {
+      const table = document.getElementById('projection-body');
+      const now = new Date();
+      table.innerHTML = '';
+      for (let i = 1; i <= 4; i++) {
+        const future = new Date(now.getTime() + i * 15 * 60000);
+        const time = future.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+        const levels = ['heavy', 'moderate', 'fast'];
+        const we = levels[Math.floor(Math.random() * 3)];
+        const ee = levels[Math.floor(Math.random() * 3)];
+        const mpx = levels[Math.floor(Math.random() * 3)];
+        table.innerHTML += `<tr>
+          <td>${time}</td>
+          <td class="${we === 'heavy' ? 'text-red-600' : we === 'moderate' ? 'text-yellow-600' : 'text-green-600'}">${we}</td>
+          <td class="${ee === 'heavy' ? 'text-red-600' : ee === 'moderate' ? 'text-yellow-600' : 'text-green-600'}">${ee}</td>
+          <td class="${mpx === 'heavy' ? 'text-red-600' : mpx === 'moderate' ? 'text-yellow-600' : 'text-green-600'}">${mpx}</td>
+        </tr>`;
+      }
+    }
+
+    function renderSpeedChart() {
+      const ctx = document.getElementById('speedChart').getContext('2d');
+      new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: ['6 AM', '7 AM', '8 AM', '9 AM', '10 AM', '11 AM', '12 PM'],
+          datasets: [
+            {
+              label: 'Western Express Hwy',
+              borderColor: '#16a34a',
+              data: [50, 45, 40, 35, 38, 42, 50],
+              fill: false
+            },
+            {
+              label: 'Eastern Express Hwy',
+              borderColor: '#eab308',
+              data: [48, 43, 38, 36, 40, 44, 49],
+              fill: false
+            },
+            {
+              label: 'Mumbai-Pune Expressway',
+              borderColor: '#dc2626',
+              data: [70, 68, 65, 60, 63, 67, 72],
+              fill: false
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: {
+              position: 'bottom'
+            }
+          },
+          scales: {
+            y: {
+              title: {
+                display: true,
+                text: 'Speed (km/h)'
+              },
+              beginAtZero: true
+            }
+          }
+        }
+      });
+    }
+
+    getTrafficStatus();
+    setInterval(getTrafficStatus, 60000);
+    generateProjections();
+    setInterval(generateProjections, 300000);
+    renderSpeedChart();
+  </script>
+</body>
+</html>
